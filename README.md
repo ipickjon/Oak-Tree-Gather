@@ -81,7 +81,7 @@ During planning, attendees only see the friendly name:
 
 ``` text
 Jon's House
-Matt's House
+Bob Ross's House
 Local Game Store
 ```
 
@@ -94,7 +94,7 @@ Example using a fictional address:
 ``` text
 📍 Jon's House
 1842 Example Lantern Way
-Denver, CO 80202
+City, STATE 12345
 
 [ 🗺️ Directions ]
 ```
@@ -191,7 +191,7 @@ Discussion threads automatically archive after the event ends.
 
 ### Role pings
 
-An organizer can select a Discord role such as `@MTG` or `@Snowboarding`
+An organizer can select a Discord role such as `@MTG` or `@Snowboarding`(which I made this for)
 when creating an event.
 
 The event can ping that role when posted.
@@ -310,8 +310,8 @@ restarts.
 4.  Choose **Set Location**.
 5.  Select saved locations such as:
     -   Jon's House
-    -   Matt's House
     -   Local Game Store
+    -   Your Local Mountain
 6.  Configure Attendance.
 7.  Enable Additional Info such as:
     -   🍕 Eating
@@ -329,8 +329,8 @@ restarts.
 2.  Choose **Vote** for Location.
 3.  Add destinations such as:
     -   Winter Park
-    -   Copper Mountain
-    -   Loveland
+    -   Niseko
+    -   Whistler
 4.  Choose single-choice or multiple-choice voting.
 5.  Choose public or anonymous results.
 6.  Enable Additional Info such as:
