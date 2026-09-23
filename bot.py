@@ -28,12 +28,11 @@ DEFAULT_TIMEZONE = os.getenv("GATHER_TIMEZONE", "America/Denver")
 DATABASE = os.getenv("GATHER_DATABASE", "gather.db")
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing from .env")
+    raise RuntimeError("DISCORD_TOKEN is missing from the environment")
 
-if not GUILD_ID:
-    raise RuntimeError("DISCORD_GUILD_ID is missing from .env")
-
-TEST_GUILD = discord.Object(id=int(GUILD_ID))
+# DISCORD_GUILD_ID is optional in production. If present, it is treated as
+# the legacy test guild so old guild-scoped commands can be cleaned up once.
+TEST_GUILD = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
 UTC = timezone.utc
 
 REPEAT_LABELS = {
@@ -3258,6 +3257,9 @@ class BasicEventModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         source = get_series(self.template_series_id) if self.template_series_id else None
+        if source and source["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("That template belongs to a different server.", ephemeral=True)
+            return
         tz_name = (source["timezone"] if source else DEFAULT_TIMEZONE) or DEFAULT_TIMEZONE
         try:
             start_at = parse_event_start(self.date.value, self.time.value, tz_name)
@@ -3324,6 +3326,10 @@ class TemplateStartSelect(discord.ui.Select):
         super().__init__(placeholder="Choose a saved template", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        source = get_series(int(self.values[0]))
+        if not source or source["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("That template is not available in this server.", ephemeral=True)
+            return
         await interaction.response.send_modal(BasicEventModal(template_series_id=int(self.values[0])))
 
 
@@ -3830,8 +3836,8 @@ class DuplicateEventModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         event = get_event(self.instance_id)
-        if not event:
-            await interaction.response.send_message("Event not found.", ephemeral=True)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
             return
         try:
             start = parse_event_start(self.date.value, self.time.value, event["timezone"] or DEFAULT_TIMEZONE)
@@ -3869,8 +3875,8 @@ class TemplateNameModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         event = get_event(self.instance_id)
-        if not event:
-            await interaction.response.send_message("Event not found.", ephemeral=True)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
             return
         save_template(interaction.guild_id, interaction.user.id, self.name.value, event["series_id"])
         await interaction.response.send_message(f"✅ Saved template **{self.name.value}**.", ephemeral=True)
@@ -3937,6 +3943,16 @@ class ManageEventView(discord.ui.View):
                 url=google_calendar_url(event), row=2
             ))
 
+    async def interaction_check(self, interaction: discord.Interaction):
+        event = get_event(self.instance_id)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
+            return False
+        if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("Only the organizer or a server manager can manage this event.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(label="Edit", emoji="✏️", style=discord.ButtonStyle.secondary, row=0)
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EditEventModal(self.instance_id))
@@ -3994,8 +4010,8 @@ class TemplateRenameModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         template = get_template(self.template_id)
-        if not template:
-            await interaction.response.send_message("Template not found.", ephemeral=True)
+        if not template or template["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Template not found in this server.", ephemeral=True)
             return
         if interaction.user.id != template["creator_id"] and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("Only the template creator or a server manager can rename it.", ephemeral=True)
@@ -4029,15 +4045,15 @@ class TemplateUpdateEventSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         template = get_template(self.template_id)
-        if not template:
-            await interaction.response.send_message("Template not found.", ephemeral=True)
+        if not template or template["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Template not found in this server.", ephemeral=True)
             return
         if interaction.user.id != template["creator_id"] and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("Only the template creator or a server manager can update it.", ephemeral=True)
             return
         event = get_event(int(self.values[0]))
-        if not event:
-            await interaction.response.send_message("Event not found.", ephemeral=True)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
             return
         if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You can only update from an event you manage.", ephemeral=True)
@@ -4063,8 +4079,8 @@ class TemplateDeleteConfirmView(discord.ui.View):
     @discord.ui.button(label="Delete Template", emoji="🗑️", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         template = get_template(self.template_id)
-        if not template:
-            await interaction.response.edit_message(content="Template not found.", view=None)
+        if not template or template["guild_id"] != interaction.guild_id:
+            await interaction.response.edit_message(content="Template not found in this server.", view=None)
             return
         if interaction.user.id != template["creator_id"] and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("Only the template creator or a server manager can delete it.", ephemeral=True)
@@ -4085,8 +4101,8 @@ class TemplateManageView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction):
         template = get_template(self.template_id)
-        if not template:
-            await interaction.response.send_message("Template not found.", ephemeral=True)
+        if not template or template["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Template not found in this server.", ephemeral=True)
             return False
         if interaction.user.id != template["creator_id"] and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message(
@@ -4139,8 +4155,8 @@ class TemplateManageSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         template = get_template(int(self.values[0]))
-        if not template:
-            await interaction.response.send_message("Template not found.", ephemeral=True)
+        if not template or template["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Template not found in this server.", ephemeral=True)
             return
         await interaction.response.edit_message(
             content=f"**{template['name']}**\nChoose an action:",
@@ -4170,8 +4186,11 @@ class ManageEventSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         instance_id = int(self.values[0])
         event = get_event(instance_id)
-        if not event:
-            await interaction.response.send_message("Event not found.", ephemeral=True)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
+            return
+        if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("You do not have permission to manage this event.", ephemeral=True)
             return
         embed = build_embed(instance_id)
         await interaction.response.edit_message(
@@ -4253,6 +4272,10 @@ class SavedLocationModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             if self.location_id:
+                existing = get_saved_location(self.location_id)
+                if not existing or existing["guild_id"] != interaction.guild_id or self.guild_id != interaction.guild_id:
+                    await interaction.response.send_message("Saved location not found in this server.", ephemeral=True)
+                    return
                 update_saved_location(
                     self.location_id,
                     self.name_input.value,
@@ -4287,6 +4310,12 @@ class SavedLocationDeleteConfirmView(discord.ui.View):
     @discord.ui.button(label="Delete Saved Location", emoji="🗑️", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         row = get_saved_location(self.location_id)
+        if not row or row["guild_id"] != interaction.guild_id or self.guild_id != interaction.guild_id:
+            await interaction.response.send_message("Saved location not found in this server.", ephemeral=True)
+            return
+        if interaction.user.id != row["creator_id"] and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("Only the person who saved this location or a server manager can delete it.", ephemeral=True)
+            return
         delete_saved_location(self.location_id)
         await interaction.response.edit_message(
             content=f"🗑️ Deleted **{row['name'] if row else 'saved location'}**. Existing events keep their address snapshot.",
@@ -4311,8 +4340,8 @@ class SavedLocationManageView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction):
         row = get_saved_location(self.location_id)
-        if not row:
-            await interaction.response.send_message("Saved location not found.", ephemeral=True)
+        if not row or row["guild_id"] != interaction.guild_id or self.guild_id != interaction.guild_id:
+            await interaction.response.send_message("Saved location not found in this server.", ephemeral=True)
             return False
         if interaction.user.id != row["creator_id"] and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message(
@@ -4362,8 +4391,8 @@ class SavedLocationSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         row = get_saved_location(int(self.values[0]))
-        if not row:
-            await interaction.response.send_message("Saved location not found.", ephemeral=True)
+        if not row or row["guild_id"] != interaction.guild_id or self.guild_id != interaction.guild_id:
+            await interaction.response.send_message("Saved location not found in this server.", ephemeral=True)
             return
         can_manage = (
             interaction.user.id == row["creator_id"]
@@ -4440,9 +4469,21 @@ class GatherBot(discord.Client):
                     f"{type(exc).__name__}: {exc}"
                 )
 
-        self.tree.copy_global_to(guild=TEST_GUILD)
-        synced = await self.tree.sync(guild=TEST_GUILD)
-        print(f"Synced {len(synced)} command(s) to test server.")
+        # Production uses GLOBAL application commands so the same Railway
+        # process works in every server that installs Oak Tree Gather.
+        synced = await self.tree.sync()
+        print(f"Synced {len(synced)} global command(s).")
+
+        # If DISCORD_GUILD_ID is still configured from the old single-server
+        # setup, remove the stale guild-scoped command copy. Global commands
+        # remain available in that server after Discord refreshes them.
+        if TEST_GUILD is not None:
+            try:
+                self.tree.clear_commands(guild=TEST_GUILD)
+                await self.tree.sync(guild=TEST_GUILD)
+                print(f"Cleared legacy guild-scoped commands for {GUILD_ID}.")
+            except Exception as exc:
+                print(f"Warning: could not clear legacy guild commands: {exc}")
 
         if not self.scheduler_loop.is_running():
             self.scheduler_loop.start()
@@ -4483,6 +4524,7 @@ event_group = app_commands.Group(name="event", description="Create and manage ev
 
 
 @event_group.command(name="create", description="Create a new event")
+@app_commands.guild_only()
 async def event_create(interaction: discord.Interaction):
     templates = get_templates(interaction.guild_id)
     if not templates:
@@ -4496,6 +4538,7 @@ async def event_create(interaction: discord.Interaction):
 
 
 @event_group.command(name="locations", description="Manage saved location names and directions addresses")
+@app_commands.guild_only()
 async def event_locations(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=saved_locations_embed(interaction.guild_id),
@@ -4505,6 +4548,7 @@ async def event_locations(interaction: discord.Interaction):
 
 
 @event_group.command(name="manage", description="Manage one of your upcoming events")
+@app_commands.guild_only()
 async def event_manage(interaction: discord.Interaction):
     can_manage = bool(interaction.user.guild_permissions.manage_guild)
     rows = get_manageable_instances(interaction.guild_id, interaction.user.id, can_manage)
@@ -4519,6 +4563,7 @@ async def event_manage(interaction: discord.Interaction):
 
 
 @event_group.command(name="template_save", description="Save an existing event as a reusable template")
+@app_commands.guild_only()
 @app_commands.describe(message_id="Message ID of the event", name="Template name")
 async def event_template_save(interaction: discord.Interaction, message_id: str, name: str):
     try:
@@ -4528,8 +4573,8 @@ async def event_template_save(interaction: discord.Interaction, message_id: str,
         return
     instance_id = instance_id_from_message_id(mid)
     event = get_event(instance_id) if instance_id else None
-    if not event:
-        await interaction.response.send_message("I could not find that event.", ephemeral=True)
+    if not event or event["guild_id"] != interaction.guild_id:
+        await interaction.response.send_message("I could not find that event in this server.", ephemeral=True)
         return
     if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
         await interaction.response.send_message("Only the organizer or a server manager can save this template.", ephemeral=True)
@@ -4539,6 +4584,7 @@ async def event_template_save(interaction: discord.Interaction, message_id: str,
 
 
 @event_group.command(name="templates", description="Manage saved event templates")
+@app_commands.guild_only()
 async def event_templates(interaction: discord.Interaction):
     rows = get_templates(interaction.guild_id)
     if not rows:
@@ -4552,6 +4598,7 @@ async def event_templates(interaction: discord.Interaction):
 
 
 @event_group.command(name="duplicate", description="Duplicate an event with fresh responses")
+@app_commands.guild_only()
 @app_commands.describe(message_id="Message ID of the event to duplicate")
 async def event_duplicate(interaction: discord.Interaction, message_id: str):
     try:
@@ -4561,8 +4608,8 @@ async def event_duplicate(interaction: discord.Interaction, message_id: str):
         return
     instance_id = instance_id_from_message_id(mid)
     event = get_event(instance_id) if instance_id else None
-    if not event:
-        await interaction.response.send_message("I could not find that event.", ephemeral=True)
+    if not event or event["guild_id"] != interaction.guild_id:
+        await interaction.response.send_message("I could not find that event in this server.", ephemeral=True)
         return
     if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
         await interaction.response.send_message("Only the organizer or a server manager can duplicate this event.", ephemeral=True)
@@ -4571,6 +4618,7 @@ async def event_duplicate(interaction: discord.Interaction, message_id: str):
 
 
 @event_group.command(name="calendar", description="Download an event calendar file (.ics)")
+@app_commands.guild_only()
 @app_commands.describe(message_id="Message ID of the event")
 async def event_calendar(interaction: discord.Interaction, message_id: str):
     try:
@@ -4580,8 +4628,8 @@ async def event_calendar(interaction: discord.Interaction, message_id: str):
         return
     instance_id = instance_id_from_message_id(mid)
     event = get_event(instance_id) if instance_id else None
-    if not event:
-        await interaction.response.send_message("I could not find that event.", ephemeral=True)
+    if not event or event["guild_id"] != interaction.guild_id:
+        await interaction.response.send_message("I could not find that event in this server.", ephemeral=True)
         return
     filename = re.sub(r"[^A-Za-z0-9_-]+", "_", event["title"]).strip("_") or "event"
     await interaction.response.send_message(
@@ -4591,6 +4639,7 @@ async def event_calendar(interaction: discord.Interaction, message_id: str):
 
 
 @event_group.command(name="refresh", description="Refresh one event message by its message ID")
+@app_commands.guild_only()
 @app_commands.describe(message_id="Discord message ID of the event")
 async def event_refresh(interaction: discord.Interaction, message_id: str):
     try:
@@ -4601,8 +4650,9 @@ async def event_refresh(interaction: discord.Interaction, message_id: str):
 
     with get_db() as db:
         row = db.execute("SELECT id FROM event_instances WHERE message_id = ?", (message_id_int,)).fetchone()
-    if not row:
-        await interaction.response.send_message("I could not find that event in the database.", ephemeral=True)
+    event = get_event(row["id"]) if row else None
+    if not event or event["guild_id"] != interaction.guild_id:
+        await interaction.response.send_message("I could not find that event in this server.", ephemeral=True)
         return
 
     await refresh_event_message(row["id"])
