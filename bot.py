@@ -1026,34 +1026,6 @@ def parse_event_end(date_text: str, time_text: str, tz_name: str) -> datetime:
     return start + timedelta(hours=3)
 
 
-def google_calendar_url(event) -> str | None:
-    """Build a Google Calendar URL when the event has a parseable date/time.
-
-    Older test events may contain free-form values such as "asdf". Those
-    events should still restore after a bot restart; they simply do not get a
-    calendar link until their date/time is edited to a valid value.
-    """
-    try:
-        start = from_iso(event["occurrence_start_at"]) or parse_event_start(
-            event["date_text"], event["time_text"], event["timezone"] or DEFAULT_TIMEZONE
-        )
-        end = parse_event_end(
-            event["date_text"], event["time_text"], event["timezone"] or DEFAULT_TIMEZONE
-        )
-    except (ValueError, TypeError):
-        return None
-
-    location = get_location(event["series_id"], event["selected_location_id"])
-    params = {
-        "action": "TEMPLATE",
-        "text": event["title"],
-        "dates": f"{start.strftime('%Y%m%dT%H%M%SZ')}/{end.strftime('%Y%m%dT%H%M%SZ')}",
-        "details": event["description"] or "",
-        "location": location["label"] if location else "",
-    }
-    return "https://calendar.google.com/calendar/render?" + urlencode(params)
-
-
 def build_ics(event) -> bytes:
     start = from_iso(event["occurrence_start_at"]) or parse_event_start(
         event["date_text"], event["time_text"], event["timezone"] or DEFAULT_TIMEZONE
@@ -1202,14 +1174,9 @@ def build_embed(instance_id: int) -> discord.Embed | None:
 
     cancelled = event["status"] == "cancelled"
     color = discord.Color.red() if cancelled else discord.Color.blurple()
-
     vote_cutoff = from_iso(event["vote_cutoff_at"])
     rsvp_cutoff = from_iso(event["rsvp_cutoff_at"])
 
-    # Keep the description and all relevant deadlines together at the very top.
-    # Discord does not support a literal bordered text box inside an embed, so
-    # these box-drawing separators create a compact Apollo-like description panel
-    # that remains readable on mobile.
     description_lines = []
     if event["description"]:
         description_lines.append(event["description"])
@@ -1230,66 +1197,16 @@ def build_embed(instance_id: int) -> discord.Embed | None:
             + "\n╰─────────────────────────"
         )
 
-    embed = discord.Embed(
-        title=event["title"],
-        description=description,
-        color=color,
-    )
+    embed = discord.Embed(title=event["title"], description=description, color=color)
 
     embed.add_field(
-        name="__**📅 Date**__",
-        value=format_event_date(event["date_text"]),
-        inline=True,
-    )
-    embed.add_field(
-        name="__**⏰ Time**__",
-        value=event["time_text"],
-        inline=True,
-    )
-
-    counts = summary_counts(instance_id, event["series_id"])
-    attendance_summary = [
-        f"✅ **{counts['going']}** Going",
-        f"❓ **{counts['tentative']}** Tentative",
-    ]
-    if counts["has_not_going"]:
-        attendance_summary.append(f"❌ **{counts['not_going']}** Can't Go")
-
-    expected_line = f"👥 Expected **{counts['expected']}**"
-    if event["capacity"]:
-        expected_line += f" / **{event['capacity']}** capacity"
-
-    summary_lines = [
-        expected_line,
-        "  •  ".join(attendance_summary),
-    ]
-    optional_summary = []
-    if counts["has_eating"]:
-        optional_summary.append(f"🍕 Eating **{counts['eating']}**")
-    if counts["has_driving"]:
-        optional_summary.append(
-            f"🚗 Drivers **{counts['drivers']}** / Seats **{counts['available_seats']}**"
-        )
-    if counts["has_need_ride"]:
-        optional_summary.append(f"🙋 Need Ride **{counts['need_ride']}**")
-    if counts["has_guest"]:
-        optional_summary.append(f"➕ Guests **{counts['guests']}**")
-    if optional_summary:
-        summary_lines.append("  •  ".join(optional_summary))
-    if counts["waitlist"]:
-        summary_lines.append(f"⏳ Waitlist **{counts['waitlist']}**")
-
-    embed.add_field(
-        name="__**📊 Summary**__",
-        value="\n".join(summary_lines),
+        name="__**🕐 Time**__",
+        value=f"{format_event_date(event['date_text'])} • {event['time_text']}",
         inline=False,
     )
 
     now = datetime.now(UTC)
-    locations = get_locations(event["series_id"])
 
-    # No-location events (Discord/game nights, online hangouts, etc.) omit
-    # the Location section entirely.
     if event["location_mode"] == "vote":
         vote_counts = get_location_vote_counts(instance_id)
         highest = max((row["vote_count"] for row in vote_counts), default=0)
@@ -1297,8 +1214,6 @@ def build_embed(instance_id: int) -> discord.Embed | None:
         selected_location = get_location(event["series_id"], event["selected_location_id"])
         voting_closed = bool(vote_cutoff and now >= vote_cutoff)
 
-        # Once finalized, collapse the voting UI into a clean destination.
-        # This is the first time an address is exposed publicly.
         if event["location_finalized"] and selected_location:
             location_lines = [f"**{selected_location['label']}**"]
             if selected_location["address"]:
@@ -1323,11 +1238,7 @@ def build_embed(instance_id: int) -> discord.Embed | None:
             else:
                 headline = "**Currently tied:** " + ", ".join(row["label"] for row in leaders)
 
-            voting_mode_note = (
-                "☑️ Multiple choice" if event["vote_type"] == "multi" else "1️⃣ Single choice"
-            )
-            visibility_note = "🕵️ Anonymous" if event["vote_visibility"] == "anonymous" else "👥 Public"
-            lines = [headline, f"{voting_mode_note} • {visibility_note}", ""]
+            lines = [headline]
             for location in vote_counts:
                 if event["vote_visibility"] == "anonymous":
                     count = location["vote_count"]
@@ -1335,7 +1246,6 @@ def build_embed(instance_id: int) -> discord.Embed | None:
                 else:
                     voters = get_location_voters(instance_id, location["id"])
                     people = ", ".join(row["user_name"] for row in voters) if voters else "—"
-                # Address intentionally omitted during voting.
                 lines.append(f"**{location['label']}:** {people}")
 
             embed.add_field(
@@ -1349,45 +1259,50 @@ def build_embed(instance_id: int) -> discord.Embed | None:
             location_lines = [f"**{selected_location['label']}**"]
             if selected_location["address"]:
                 location_lines.append(selected_location["address"])
-            location_value = "\n".join(location_lines)
+            embed.add_field(
+                name="__**📍 Location**__",
+                value=safe_field_value("\n".join(location_lines)),
+                inline=False,
+            )
         else:
-            location_value = "Not selected yet"
-        embed.add_field(
-            name="__**📍 Location**__",
-            value=safe_field_value(location_value),
-            inline=False,
-        )
+            embed.add_field(name="__**📍 Location**__", value="Not selected yet", inline=False)
 
+    counts = summary_counts(instance_id, event["series_id"])
     for group in get_signup_groups(event["series_id"]):
+        is_attendance = "Attendance" in group["name"]
         lines = []
         for option in get_signup_options(group["id"]):
             people = get_option_people(instance_id, option["id"])
             semantic = option_semantic(option["label"])
             display_names = []
+            quantity_total = 0
+
             for row in people:
                 name = row["user_name"]
                 if semantic == "guest":
                     qty = get_response_quantity(instance_id, row["user_id"], option["id"], 1)
+                    quantity_total += qty
                     name = f"{name} (+{qty})"
                 elif semantic == "driving":
                     qty = get_response_quantity(instance_id, row["user_id"], option["id"], 1)
                     name = f"{name} ({qty} seat{'s' if qty != 1 else ''})"
                 display_names.append(name)
-            names = ", ".join(display_names) if display_names else "—"
-            lines.append(f"**{option['label']}:** {names}")
 
-        group_name = group["name"]
-        if "Attendance" in group_name:
-            group_name = "__**👥 Attendance**__"
-        elif "Additional Info" in group_name:
-            group_name = "__**ℹ️ Additional Info**__"
-        else:
-            group_name = f"__**{group_name}**__"
-        embed.add_field(
-            name=group_name,
-            value=safe_field_value("\n".join(lines)),
-            inline=False,
-        )
+            if not is_attendance and not people:
+                continue
+
+            count = quantity_total if semantic == "guest" else len(people)
+            names = ", ".join(display_names) if display_names else "—"
+            lines.append(f"**{option['label']} ({count}):** {names}")
+
+        if is_attendance and event["capacity"]:
+            lines.append(f"🎟️ **Capacity:** {counts['expected']}/{event['capacity']}")
+
+        if not lines:
+            continue
+
+        group_name = "__**👥 Attendance**__" if is_attendance else "__**ℹ️ Additional Info**__"
+        embed.add_field(name=group_name, value=safe_field_value("\n".join(lines)), inline=False)
 
     waitlist = get_waitlist(instance_id)
     if waitlist:
@@ -1411,12 +1326,7 @@ def build_embed(instance_id: int) -> discord.Embed | None:
     if cancelled:
         footer_bits.append("CANCELLED")
     embed.set_footer(text=" • ".join(footer_bits))
-
     return embed
-
-
-# ==================================================
-# PUBLIC EVENT BUTTONS
 # ==================================================
 
 
@@ -1810,14 +1720,11 @@ class EventView(discord.ui.View):
         if event is None:
             return
 
-        # Row 0: locations
-        for location in get_locations(event["series_id"]):
-            self.add_item(
-                LocationButton(instance_id, location["id"], location["label"], row=0)
-            )
+        if event["location_mode"] == "vote":
+            for location in get_locations(event["series_id"]):
+                self.add_item(LocationButton(instance_id, location["id"], location["label"], row=0))
 
-        # Rows 1-2: attendance and additional info
-        signup_row = 1
+        signup_row = 1 if event["location_mode"] == "vote" else 0
         for group in get_signup_groups(event["series_id"]):
             for option in get_signup_options(group["id"]):
                 self.add_item(
@@ -1832,48 +1739,30 @@ class EventView(discord.ui.View):
                 )
             signup_row += 1
 
-        # Row 3: participant utility + organizer controls
-        self.add_item(ClearResponseButton(instance_id, row=3))
-        self.add_item(EditEventButton(instance_id, row=3))
-        if event["location_mode"] == "vote":
-            self.add_item(FinalizeLocationButton(instance_id, row=3))
-        self.add_item(CancelEventButton(instance_id, row=3))
+        self.add_item(ClearResponseButton(instance_id, row=min(signup_row, 3)))
 
-        # Row 4: useful navigation links. Legacy/free-form test events may
-        # not have a parseable date/time, so only add Calendar when valid.
-        calendar_url = google_calendar_url(event)
-        if calendar_url:
-            self.add_item(
-                discord.ui.Button(
-                    label="Add to Google",
-                    emoji="📅",
-                    style=discord.ButtonStyle.link,
-                    url=calendar_url,
-                    row=4,
-                )
-            )
-        # Directions only appears after the destination is finalized and only
-        # when that saved/custom option has an address.
         selected_location = get_location(event["series_id"], event["selected_location_id"])
         directions_url = (
             google_maps_directions_url(selected_location["address"])
             if selected_location and event["location_finalized"]
             else None
         )
+        link_row = min(signup_row + 1, 4)
         if directions_url:
             self.add_item(
                 discord.ui.Button(
-                    label="Directions",
-                    emoji="🗺️",
-                    style=discord.ButtonStyle.link,
-                    url=directions_url,
-                    row=4,
+                    label="Directions", emoji="🗺️", style=discord.ButtonStyle.link,
+                    url=directions_url, row=link_row
                 )
             )
-
         if event["thread_id"]:
             thread_url = f"https://discord.com/channels/{event['guild_id']}/{event['thread_id']}"
-            self.add_item(discord.ui.Button(label="Discussion", emoji="💬", style=discord.ButtonStyle.link, url=thread_url, row=4))
+            self.add_item(
+                discord.ui.Button(
+                    label="Discussion", emoji="💬", style=discord.ButtonStyle.link,
+                    url=thread_url, row=link_row
+                )
+            )
 
         self.refresh_buttons()
 
@@ -1890,16 +1779,7 @@ class EventView(discord.ui.View):
         location_buttons = [c for c in self.children if isinstance(c, LocationButton)]
         signup_buttons = [c for c in self.children if isinstance(c, SignupButton)]
 
-        if event["location_mode"] == "set":
-            for button in location_buttons:
-                button.label = button.location_label
-                button.style = (
-                    discord.ButtonStyle.success
-                    if event["selected_location_id"] == button.location_id
-                    else discord.ButtonStyle.secondary
-                )
-                button.disabled = inactive
-        elif event["location_mode"] == "vote":
+        if event["location_mode"] == "vote":
             counts = get_location_vote_counts(self.instance_id)
             count_map = {row["id"]: row["vote_count"] for row in counts}
             highest = max(count_map.values(), default=0)
@@ -1942,10 +1822,6 @@ class EventView(discord.ui.View):
         for child in self.children:
             if isinstance(child, ClearResponseButton):
                 child.disabled = inactive or bool(rsvp_cutoff and now >= rsvp_cutoff)
-            if isinstance(child, (EditEventButton, FinalizeLocationButton, CancelEventButton)):
-                child.disabled = inactive
-            if isinstance(child, FinalizeLocationButton) and event["location_finalized"]:
-                child.disabled = True
 
 
 class EditEventButton(discord.ui.Button):
@@ -2239,8 +2115,9 @@ class EventDraft:
     location_addresses: dict[str, str | None] = field(default_factory=dict)
     # Name -> saved location ID when the option came from the server location book.
     location_saved_ids: dict[str, int | None] = field(default_factory=dict)
+    initial_location_label: str | None = None
     attendance_options: list[str] = field(
-        default_factory=lambda: ["✅ Going", "❓ Tentative", "❌ Can't Go"]
+        default_factory=lambda: ["✅ Going", "❓ Tentative"]
     )
     additional_info_options: list[str] = field(default_factory=list)
     image_bytes: bytes | None = None
@@ -2286,6 +2163,8 @@ def build_setup_embed(draft: EventDraft) -> discord.Embed:
         # Intentionally show names only here. Saved addresses remain private
         # until the final public event has a finalized destination.
         location_text += "\n".join(f"• {x}" for x in draft.location_options)
+        if draft.location_mode == "set" and draft.initial_location_label:
+            location_text += f"\n\n**Current event:** {draft.initial_location_label}"
         embed.add_field(name="📍 Location", value=location_text, inline=False)
 
     embed.add_field(
@@ -2451,18 +2330,61 @@ class LocationChoiceBaseModal(discord.ui.Modal):
 class SetLocationModal(LocationChoiceBaseModal):
     def __init__(self, setup_view):
         super().__init__(setup_view, title="Set Location")
+        draft = setup_view.draft
+        saved = get_saved_locations(draft.guild_id)
+
+        self.initial_select = None
+        if saved:
+            self.initial_select = discord.ui.Select(
+                placeholder="Pre-select this occurrence (optional)",
+                min_values=0,
+                max_values=1,
+                required=False,
+                options=[
+                    discord.SelectOption(
+                        label=row["name"][:100],
+                        value=str(row["id"]),
+                        emoji="📍",
+                        default=(draft.initial_location_label == row["name"]),
+                    )
+                    for row in saved[:25]
+                ],
+            )
+            self.add_item(
+                discord.ui.Label(
+                    text="Current Event Location",
+                    description="Optional. Only organizers see this chooser; attendees see the result.",
+                    component=self.initial_select,
+                )
+            )
+
         self.add_location_inputs()
 
     async def on_submit(self, interaction: discord.Interaction):
         locations, addresses, saved_ids = self.collect_locations()
+        draft = self.setup_view.draft
+
+        initial_label = None
+        if self.initial_select is not None and self.initial_select.values:
+            initial_row = get_saved_location(int(self.initial_select.values[0]))
+            if initial_row and initial_row["guild_id"] == draft.guild_id:
+                initial_label = initial_row["name"]
+                if initial_label.casefold() not in {x.casefold() for x in locations}:
+                    locations.append(initial_label)
+                    addresses[initial_label] = initial_row["address"]
+                    saved_ids[initial_label] = initial_row["id"]
+
         if not await self.validate_locations(interaction, locations):
             return
 
-        draft = self.setup_view.draft
+        if initial_label is None and len(locations) == 1:
+            initial_label = locations[0]
+
         draft.location_mode = "set"
         draft.location_options = locations
         draft.location_addresses = addresses
         draft.location_saved_ids = saved_ids
+        draft.initial_location_label = initial_label
 
         await interaction.response.edit_message(
             embed=build_setup_embed(draft),
@@ -2538,6 +2460,7 @@ class VoteLocationModal(LocationChoiceBaseModal):
         draft.location_options = locations
         draft.location_addresses = addresses
         draft.location_saved_ids = saved_ids
+        draft.initial_location_label = None
 
         await interaction.response.edit_message(
             embed=build_setup_embed(draft),
@@ -2568,6 +2491,7 @@ class LocationModeView(discord.ui.View):
         draft.location_options = []
         draft.location_addresses = {}
         draft.location_saved_ids = {}
+        draft.initial_location_label = None
         await interaction.response.edit_message(
             embed=build_setup_embed(draft),
             view=self.setup_view,
@@ -2596,7 +2520,7 @@ class AttendanceSetupModal(discord.ui.Modal, title="Attendance"):
         super().__init__()
         self.setup_view = setup_view
         self.options_input = discord.ui.TextInput(
-            placeholder="✅ Going, ❓ Tentative, ❌ Can't Go",
+            placeholder="✅ Going, ❓ Tentative",
             default=", ".join(setup_view.draft.attendance_options),
             style=discord.TextStyle.paragraph,
             max_length=400,
@@ -3587,6 +3511,19 @@ async def create_event_from_draft(interaction: discord.Interaction, draft: Event
             (iso_utc(draft.vote_cutoff_at_utc), iso_utc(draft.rsvp_cutoff_at_utc), instance_id),
         )
 
+        # Set-location events can pre-decide the first occurrence during creation.
+        # Recurring future occurrences still start fresh and can be chosen in /event manage.
+        if draft.location_mode == "set" and draft.initial_location_label:
+            selected = db.execute(
+                "SELECT id FROM location_options WHERE series_id=? AND label=? LIMIT 1",
+                (series_id, draft.initial_location_label),
+            ).fetchone()
+            if selected:
+                db.execute(
+                    "UPDATE event_instances SET selected_location_id=?, location_finalized=1 WHERE id=?",
+                    (selected["id"], instance_id),
+                )
+
     return await post_instance_message(instance_id, ping_role=True)
 
 
@@ -3927,20 +3864,98 @@ class ExistingCapacityModal(discord.ui.Modal, title="Capacity & Waitlist"):
         await interaction.response.send_message(msg, ephemeral=True)
 
 
+class SetCurrentLocationModal(discord.ui.Modal, title="Set Event Location"):
+    def __init__(self, instance_id: int):
+        super().__init__()
+        self.instance_id = instance_id
+        event = get_event(instance_id)
+        if event is None:
+            raise RuntimeError("Event not found")
+
+        locations = get_locations(event["series_id"])
+        if not locations:
+            raise RuntimeError("This event has no configured locations")
+
+        self.location_select = discord.ui.Select(
+            placeholder="Choose the location for this occurrence",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=row["label"][:100],
+                    value=str(row["id"]),
+                    default=(event["selected_location_id"] == row["id"]),
+                )
+                for row in locations[:25]
+            ],
+        )
+        self.add_item(discord.ui.Label(text="Location", component=self.location_select))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        event = get_event(self.instance_id)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
+            return
+        if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only the organizer or a server manager can set the location.",
+                ephemeral=True,
+            )
+            return
+
+        location_id = int(self.location_select.values[0])
+        location = get_location(event["series_id"], location_id)
+        if not location:
+            await interaction.response.send_message("Location not found.", ephemeral=True)
+            return
+
+        with get_db() as db:
+            db.execute(
+                "UPDATE event_instances SET selected_location_id=?, location_finalized=1 WHERE id=?",
+                (location_id, self.instance_id),
+            )
+        await refresh_event_message(self.instance_id)
+        await interaction.response.send_message(
+            f"📍 Location set to **{location['label']}**.",
+            ephemeral=True,
+        )
+
+
+class ManageSetLocationButton(discord.ui.Button):
+    def __init__(self, instance_id: int):
+        super().__init__(
+            label="Set Location",
+            emoji="📍",
+            style=discord.ButtonStyle.primary,
+            row=1,
+        )
+        self.instance_id = instance_id
+
+    async def callback(self, interaction: discord.Interaction):
+        event = get_event(self.instance_id)
+        if not event or event["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("Event not found in this server.", ephemeral=True)
+            return
+        if interaction.user.id != event["creator_id"] and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only the organizer or a server manager can set the location.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(SetCurrentLocationModal(self.instance_id))
+
+
 class ManageEventView(discord.ui.View):
     def __init__(self, instance_id: int):
         super().__init__(timeout=600)
         self.instance_id = instance_id
         event = get_event(instance_id)
+        if event and event["location_mode"] == "set":
+            self.add_item(ManageSetLocationButton(instance_id))
         if event and event["thread_id"]:
             self.add_item(discord.ui.Button(
                 label="Discussion", emoji="💬", style=discord.ButtonStyle.link,
                 url=f"https://discord.com/channels/{event['guild_id']}/{event['thread_id']}", row=2
-            ))
-        if event:
-            self.add_item(discord.ui.Button(
-                label="Google Calendar", emoji="📅", style=discord.ButtonStyle.link,
-                url=google_calendar_url(event), row=2
             ))
 
     async def interaction_check(self, interaction: discord.Interaction):
