@@ -2227,6 +2227,220 @@ def build_setup_embed(draft: EventDraft) -> discord.Embed:
     return embed
 
 
+class LocationChoiceBaseModal(discord.ui.Modal):
+    """Shared saved/custom location controls for Set Location and Vote."""
+
+    def __init__(self, setup_view, *, title: str):
+        super().__init__(title=title)
+        self.setup_view = setup_view
+        draft = setup_view.draft
+        saved = get_saved_locations(draft.guild_id)
+
+        self.saved_select = None
+        if saved:
+            saved_defaults = {
+                sid for sid in draft.location_saved_ids.values() if sid is not None
+            }
+            options = [
+                discord.SelectOption(
+                    label=row["name"][:100],
+                    value=str(row["id"]),
+                    emoji="📌",
+                    default=(row["id"] in saved_defaults),
+                )
+                for row in saved[:25]
+            ]
+            self.saved_select = discord.ui.Select(
+                placeholder="Saved places (optional)",
+                min_values=0,
+                max_values=min(5, len(options)),
+                required=False,
+                options=options,
+            )
+
+        custom_names = [
+            name for name in draft.location_options
+            if not draft.location_saved_ids.get(name)
+        ]
+        self.locations_input = discord.ui.TextInput(
+            placeholder="Optional custom names: Winter Park, Game Store",
+            default=", ".join(custom_names) or None,
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=400,
+        )
+
+    def add_location_inputs(self):
+        if self.saved_select is not None:
+            self.add_item(
+                discord.ui.Label(
+                    text="Saved Places",
+                    description="Names only here; addresses stay hidden until finalized.",
+                    component=self.saved_select,
+                )
+            )
+        self.add_item(
+            discord.ui.Label(
+                text="Custom Locations",
+                description="Optional. Custom names have no Directions address unless saved first.",
+                component=self.locations_input,
+            )
+        )
+
+    def collect_locations(self):
+        locations = []
+        addresses = {}
+        saved_ids = {}
+
+        if self.saved_select is not None:
+            for raw_id in self.saved_select.values:
+                row = get_saved_location(int(raw_id))
+                if row and row["guild_id"] == self.setup_view.draft.guild_id:
+                    locations.append(row["name"])
+                    addresses[row["name"]] = row["address"]
+                    saved_ids[row["name"]] = row["id"]
+
+        for name in parse_options(self.locations_input.value):
+            if name.casefold() not in {x.casefold() for x in locations}:
+                locations.append(name)
+                addresses[name] = None
+                saved_ids[name] = None
+
+        return locations, addresses, saved_ids
+
+    async def validate_locations(self, interaction, locations):
+        if not locations:
+            await interaction.response.send_message(
+                "Choose at least one saved place or enter a custom location.",
+                ephemeral=True,
+            )
+            return False
+        if len(locations) > 5:
+            await interaction.response.send_message(
+                "Please use 5 locations or fewer.",
+                ephemeral=True,
+            )
+            return False
+        if any(len(x) > 60 for x in locations):
+            await interaction.response.send_message(
+                "Please keep location names to 60 characters or fewer.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+
+class SetLocationModal(LocationChoiceBaseModal):
+    def __init__(self, setup_view):
+        super().__init__(setup_view, title="Set Location")
+        self.add_location_inputs()
+
+    async def on_submit(self, interaction: discord.Interaction):
+        locations, addresses, saved_ids = self.collect_locations()
+        if not await self.validate_locations(interaction, locations):
+            return
+
+        draft = self.setup_view.draft
+        draft.location_mode = "set"
+        draft.location_options = locations
+        draft.location_addresses = addresses
+        draft.location_saved_ids = saved_ids
+
+        # If exactly one place is supplied, it is unambiguously the chosen
+        # location and can be finalized immediately. With multiple choices,
+        # the organizer can select the final place later through /event manage.
+        draft.initial_location_label = locations[0] if len(locations) == 1 else None
+
+        await interaction.response.edit_message(
+            embed=build_setup_embed(draft),
+            view=self.setup_view,
+        )
+
+
+class VoteLocationModal(LocationChoiceBaseModal):
+    def __init__(self, setup_view):
+        super().__init__(setup_view, title="Location Vote")
+        draft = setup_view.draft
+
+        self.vote_type_select = discord.ui.Select(
+            placeholder="How may people vote?",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Single choice",
+                    value="single",
+                    emoji="1️⃣",
+                    description="Each person may select one location",
+                    default=(draft.vote_type == "single"),
+                ),
+                discord.SelectOption(
+                    label="Multiple choice",
+                    value="multi",
+                    emoji="☑️",
+                    description="Each person may select every location they'd accept",
+                    default=(draft.vote_type == "multi"),
+                ),
+            ],
+        )
+        self.visibility_select = discord.ui.Select(
+            placeholder="How should results display?",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Public",
+                    value="public",
+                    emoji="👥",
+                    description="Show who voted for each location",
+                    default=(draft.vote_visibility == "public"),
+                ),
+                discord.SelectOption(
+                    label="Anonymous",
+                    value="anonymous",
+                    emoji="🕵️",
+                    description="Show vote totals but hide voter names",
+                    default=(draft.vote_visibility == "anonymous"),
+                ),
+            ],
+        )
+
+        self.add_item(
+            discord.ui.Label(
+                text="Voting Type",
+                description="Choose one location or every location you'd accept.",
+                component=self.vote_type_select,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Vote Results",
+                description="Public shows names; Anonymous shows totals only.",
+                component=self.visibility_select,
+            )
+        )
+        self.add_location_inputs()
+
+    async def on_submit(self, interaction: discord.Interaction):
+        locations, addresses, saved_ids = self.collect_locations()
+        if not await self.validate_locations(interaction, locations):
+            return
+
+        draft = self.setup_view.draft
+        draft.location_mode = "vote"
+        draft.vote_type = self.vote_type_select.values[0]
+        draft.vote_visibility = self.visibility_select.values[0]
+        draft.location_options = locations
+        draft.location_addresses = addresses
+        draft.location_saved_ids = saved_ids
+        draft.initial_location_label = None
+
+        await interaction.response.edit_message(
+            embed=build_setup_embed(draft),
+            view=self.setup_view,
+        )
+
+
 class LocationModeView(discord.ui.View):
     """Small first step so irrelevant voting controls never appear for Set Location."""
 
