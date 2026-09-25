@@ -2135,77 +2135,50 @@ class EventDraft:
 
 
 def build_setup_embed(draft: EventDraft) -> discord.Embed:
+    """Compact private creator preview; optional settings appear only when enabled."""
+    friendly_date = format_event_date(draft.date_text)
+
     embed = discord.Embed(
         title="Event Setup",
-        description=f"### {draft.title}\nConfigure the event below, then press **Create Event**.",
+        description=(
+            f"### {draft.title}\n"
+            f"🕐 **{friendly_date} • {draft.time_text}**\n\n"
+            "Configure what you need below, then press **Create Event**."
+        ),
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="📅 Date", value=draft.date_text, inline=True)
-    embed.add_field(name="⏰ Time", value=draft.time_text, inline=True)
 
     if draft.location_mode is None:
-        location_text = "⚠️ Not configured\nPress **Location** below."
-        embed.add_field(name="📍 Location", value=location_text, inline=False)
+        location_text = "⚠️ Not configured"
     elif draft.location_mode == "none":
-        # Setup-only confirmation. The final public event omits Location entirely.
+        location_text = "🌐 No Location"
+    elif draft.location_mode == "vote":
+        vote_type_label = "Single choice" if draft.vote_type == "single" else "Multiple choice"
+        visibility_label = "Public" if draft.vote_visibility == "public" else "Anonymous"
+        names = ", ".join(draft.location_options) if draft.location_options else "No options"
+        location_text = f"🗳️ Vote • {vote_type_label} • {visibility_label}\n{names}"
+    else:
+        names = ", ".join(draft.location_options) if draft.location_options else "No options"
+        if draft.initial_location_label:
+            location_text = f"📍 {draft.initial_location_label}\nChoices: {names}"
+        else:
+            location_text = f"📍 Organizer selects\n{names}"
+
+    embed.add_field(name="📍 Location", value=location_text, inline=False)
+
+    attendance_text = " • ".join(draft.attendance_options) if draft.attendance_options else "None"
+    embed.add_field(name="👥 Attendance", value=attendance_text, inline=False)
+
+    if draft.additional_info_options:
         embed.add_field(
-            name="📍 Location",
-            value="No location • the public event will not show a Location section.",
+            name="ℹ️ Additional Info",
+            value=" • ".join(draft.additional_info_options),
             inline=False,
         )
-    else:
-        mode_label = "🗳️ Vote" if draft.location_mode == "vote" else "📌 Set Location"
-        location_text = f"**Mode:** {mode_label}\n"
-        if draft.location_mode == "vote":
-            vote_type_label = "Single choice" if draft.vote_type == "single" else "Multiple choice"
-            visibility_label = "Public names" if draft.vote_visibility == "public" else "Anonymous totals"
-            location_text += f"**Voting:** {vote_type_label} • {visibility_label}\n"
-        # Intentionally show names only here. Saved addresses remain private
-        # until the final public event has a finalized destination.
-        location_text += "\n".join(f"• {x}" for x in draft.location_options)
-        if draft.location_mode == "set" and draft.initial_location_label:
-            location_text += f"\n\n**Current event:** {draft.initial_location_label}"
-        embed.add_field(name="📍 Location", value=location_text, inline=False)
 
-    embed.add_field(
-        name="👥 Attendance",
-        value="\n".join(f"• {x}" for x in draft.attendance_options),
-        inline=False,
-    )
-    embed.add_field(
-        name="ℹ️ Additional Info",
-        value=("\n".join(f"• {x}" for x in draft.additional_info_options) if draft.additional_info_options else "None"),
-        inline=False,
-    )
+    if draft.ping_role_id:
+        embed.add_field(name="📣 Ping", value=f"<@&{draft.ping_role_id}>", inline=False)
 
-    role_text = f"<@&{draft.ping_role_id}>" if draft.ping_role_id else "No role ping"
-    embed.add_field(name="📣 Ping Role", value=role_text, inline=False)
-    embed.add_field(name="🧵 Discussion Thread", value=("Create automatically" if draft.thread_enabled else "Off"), inline=False)
-    embed.add_field(
-        name="🎟️ Capacity",
-        value=(f"{draft.capacity} people • automatic waitlist" if draft.capacity else "Unlimited"),
-        inline=False,
-    )
-
-    schedule_lines = [f"🌐 **Timezone:** {draft.timezone}"]
-    if draft.repeat_rule != "none":
-        if draft.location_mode == "vote":
-            schedule_lines.append(
-                f"🗳️ **Voting closes:** {recurring_cutoff_text(draft.start_at_utc, draft.vote_cutoff_at_utc, draft.timezone)}"
-            )
-        schedule_lines.append(
-            f"👥 **RSVP closes:** {recurring_cutoff_text(draft.start_at_utc, draft.rsvp_cutoff_at_utc, draft.timezone)}"
-        )
-        schedule_lines.append(f"📆 **Post next occurrence:** {draft.post_days_before} day(s) before")
-    else:
-        if draft.location_mode == "vote":
-            schedule_lines.append(f"🗳️ **Voting cutoff:** {format_local_cutoff(draft.vote_cutoff_at_utc, draft.timezone)}")
-        schedule_lines.append(f"👥 **RSVP cutoff:** {format_local_cutoff(draft.rsvp_cutoff_at_utc, draft.timezone)}")
-    schedule_lines.append(f"⏰ **Reminder:** {draft.reminder_minutes / 60:g} hour(s) before cutoff")
-    embed.add_field(name="⚙️ Schedule", value="\n".join(schedule_lines), inline=False)
-
-    # Keep recurrence out of the main event details. If enabled, show it
-    # quietly near the bottom, Apollo-style.
     if draft.repeat_rule != "none":
         repeat_text = REPEAT_FOOTER_LABELS.get(
             draft.repeat_rule,
@@ -2213,259 +2186,45 @@ def build_setup_embed(draft: EventDraft) -> discord.Embed:
         )
         embed.add_field(name="🔁 Repeat", value=repeat_text, inline=False)
 
-    embed.add_field(
-        name="🖼 Image",
-        value=(f"✅ {draft.image_filename}" if draft.image_filename else "No image"),
-        inline=False,
-    )
-    embed.set_footer(text="This setup screen is only visible to you.")
+    cutoff_lines = []
+    if draft.location_mode == "vote" and draft.vote_cutoff_at_utc:
+        if draft.repeat_rule != "none":
+            cutoff_lines.append(
+                f"🗳️ Voting: {recurring_cutoff_text(draft.start_at_utc, draft.vote_cutoff_at_utc, draft.timezone)}"
+            )
+        else:
+            cutoff_lines.append(
+                f"🗳️ Voting: {format_local_cutoff(draft.vote_cutoff_at_utc, draft.timezone)}"
+            )
+
+    if draft.rsvp_cutoff_at_utc:
+        if draft.repeat_rule != "none":
+            cutoff_lines.append(
+                f"👥 RSVP: {recurring_cutoff_text(draft.start_at_utc, draft.rsvp_cutoff_at_utc, draft.timezone)}"
+            )
+        else:
+            cutoff_lines.append(
+                f"👥 RSVP: {format_local_cutoff(draft.rsvp_cutoff_at_utc, draft.timezone)}"
+            )
+
+    if cutoff_lines:
+        embed.add_field(name="⏳ Cutoffs", value="\n".join(cutoff_lines), inline=False)
+
+    if draft.thread_enabled:
+        embed.add_field(name="🧵 Discussion", value="Create automatically", inline=False)
+
+    if draft.capacity:
+        embed.add_field(
+            name="🎟️ Capacity",
+            value=f"{draft.capacity} people • automatic waitlist",
+            inline=False,
+        )
+
+    if draft.image_filename:
+        embed.add_field(name="🖼️ Image", value=f"✅ {draft.image_filename}", inline=False)
+
+    embed.set_footer(text="Only you can see this setup.")
     return embed
-
-
-class LocationChoiceBaseModal(discord.ui.Modal):
-    """Shared saved/custom location controls for Set Location and Vote."""
-
-    def __init__(self, setup_view, *, title: str):
-        super().__init__(title=title)
-        self.setup_view = setup_view
-        draft = setup_view.draft
-        saved = get_saved_locations(draft.guild_id)
-
-        # Saved places carry an address privately. Only names appear here.
-        self.saved_select = None
-        if saved:
-            saved_defaults = {
-                sid for sid in draft.location_saved_ids.values() if sid is not None
-            }
-            options = [
-                discord.SelectOption(
-                    label=row["name"][:100],
-                    value=str(row["id"]),
-                    emoji="📌",
-                    default=(row["id"] in saved_defaults),
-                )
-                for row in saved[:25]
-            ]
-            self.saved_select = discord.ui.Select(
-                placeholder="Saved places (optional)",
-                min_values=0,
-                max_values=min(5, len(options)),
-                required=False,
-                options=options,
-            )
-
-        # Only custom/non-saved names go in the free-text box.
-        custom_names = [
-            name for name in draft.location_options
-            if not draft.location_saved_ids.get(name)
-        ]
-        self.locations_input = discord.ui.TextInput(
-            placeholder="Optional custom names: Winter Park, Game Store",
-            default=", ".join(custom_names) or None,
-            required=False,
-            style=discord.TextStyle.paragraph,
-            max_length=400,
-        )
-
-    def add_location_inputs(self):
-        if self.saved_select is not None:
-            self.add_item(
-                discord.ui.Label(
-                    text="Saved Places",
-                    description="Names only here; addresses stay hidden until finalized.",
-                    component=self.saved_select,
-                )
-            )
-        self.add_item(
-            discord.ui.Label(
-                text="Custom Locations",
-                description="Optional. Custom names have no Directions address unless saved first.",
-                component=self.locations_input,
-            )
-        )
-
-    def collect_locations(self):
-        locations = []
-        addresses = {}
-        saved_ids = {}
-
-        if self.saved_select is not None:
-            for raw_id in self.saved_select.values:
-                row = get_saved_location(int(raw_id))
-                if row and row["guild_id"] == self.setup_view.draft.guild_id:
-                    locations.append(row["name"])
-                    addresses[row["name"]] = row["address"]
-                    saved_ids[row["name"]] = row["id"]
-
-        for name in parse_options(self.locations_input.value):
-            if name.casefold() not in {x.casefold() for x in locations}:
-                locations.append(name)
-                addresses[name] = None
-                saved_ids[name] = None
-
-        return locations, addresses, saved_ids
-
-    async def validate_locations(self, interaction, locations):
-        if not locations:
-            await interaction.response.send_message(
-                "Choose at least one saved place or enter a custom location.",
-                ephemeral=True,
-            )
-            return False
-        if len(locations) > 5:
-            await interaction.response.send_message(
-                "Please use 5 locations or fewer for the tab-style buttons.",
-                ephemeral=True,
-            )
-            return False
-        if any(len(x) > 60 for x in locations):
-            await interaction.response.send_message(
-                "Please keep location names to 60 characters or fewer.",
-                ephemeral=True,
-            )
-            return False
-        return True
-
-
-class SetLocationModal(LocationChoiceBaseModal):
-    def __init__(self, setup_view):
-        super().__init__(setup_view, title="Set Location")
-        draft = setup_view.draft
-        saved = get_saved_locations(draft.guild_id)
-
-        self.initial_select = None
-        if saved:
-            self.initial_select = discord.ui.Select(
-                placeholder="Pre-select this occurrence (optional)",
-                min_values=0,
-                max_values=1,
-                required=False,
-                options=[
-                    discord.SelectOption(
-                        label=row["name"][:100],
-                        value=str(row["id"]),
-                        emoji="📍",
-                        default=(draft.initial_location_label == row["name"]),
-                    )
-                    for row in saved[:25]
-                ],
-            )
-            self.add_item(
-                discord.ui.Label(
-                    text="Current Event Location",
-                    description="Optional. Only organizers see this chooser; attendees see the result.",
-                    component=self.initial_select,
-                )
-            )
-
-        self.add_location_inputs()
-
-    async def on_submit(self, interaction: discord.Interaction):
-        locations, addresses, saved_ids = self.collect_locations()
-        draft = self.setup_view.draft
-
-        initial_label = None
-        if self.initial_select is not None and self.initial_select.values:
-            initial_row = get_saved_location(int(self.initial_select.values[0]))
-            if initial_row and initial_row["guild_id"] == draft.guild_id:
-                initial_label = initial_row["name"]
-                if initial_label.casefold() not in {x.casefold() for x in locations}:
-                    locations.append(initial_label)
-                    addresses[initial_label] = initial_row["address"]
-                    saved_ids[initial_label] = initial_row["id"]
-
-        if not await self.validate_locations(interaction, locations):
-            return
-
-        if initial_label is None and len(locations) == 1:
-            initial_label = locations[0]
-
-        draft.location_mode = "set"
-        draft.location_options = locations
-        draft.location_addresses = addresses
-        draft.location_saved_ids = saved_ids
-        draft.initial_location_label = initial_label
-
-        await interaction.response.edit_message(
-            embed=build_setup_embed(draft),
-            view=self.setup_view,
-        )
-
-
-class VoteLocationModal(LocationChoiceBaseModal):
-    def __init__(self, setup_view):
-        super().__init__(setup_view, title="Location Vote")
-        draft = setup_view.draft
-
-        self.vote_type_select = discord.ui.Select(
-            placeholder="How may people vote?",
-            min_values=1,
-            max_values=1,
-            options=[
-                discord.SelectOption(
-                    label="Single choice", value="single", emoji="1️⃣",
-                    description="Each person may select one location",
-                    default=(draft.vote_type == "single"),
-                ),
-                discord.SelectOption(
-                    label="Multiple choice", value="multi", emoji="☑️",
-                    description="Each person may select every location they'd accept",
-                    default=(draft.vote_type == "multi"),
-                ),
-            ],
-        )
-        self.visibility_select = discord.ui.Select(
-            placeholder="How should results display?",
-            min_values=1,
-            max_values=1,
-            options=[
-                discord.SelectOption(
-                    label="Public", value="public", emoji="👥",
-                    description="Show who voted for each location",
-                    default=(draft.vote_visibility == "public"),
-                ),
-                discord.SelectOption(
-                    label="Anonymous", value="anonymous", emoji="🕵️",
-                    description="Show vote totals but hide voter names",
-                    default=(draft.vote_visibility == "anonymous"),
-                ),
-            ],
-        )
-
-        self.add_item(
-            discord.ui.Label(
-                text="Voting Type",
-                description="Choose one location or every location you'd accept.",
-                component=self.vote_type_select,
-            )
-        )
-        self.add_item(
-            discord.ui.Label(
-                text="Vote Results",
-                description="Public shows names; Anonymous shows totals only.",
-                component=self.visibility_select,
-            )
-        )
-        self.add_location_inputs()
-
-    async def on_submit(self, interaction: discord.Interaction):
-        locations, addresses, saved_ids = self.collect_locations()
-        if not await self.validate_locations(interaction, locations):
-            return
-
-        draft = self.setup_view.draft
-        draft.location_mode = "vote"
-        draft.vote_type = self.vote_type_select.values[0]
-        draft.vote_visibility = self.visibility_select.values[0]
-        draft.location_options = locations
-        draft.location_addresses = addresses
-        draft.location_saved_ids = saved_ids
-        draft.initial_location_label = None
-
-        await interaction.response.edit_message(
-            embed=build_setup_embed(draft),
-            view=self.setup_view,
-        )
 
 
 class LocationModeView(discord.ui.View):
