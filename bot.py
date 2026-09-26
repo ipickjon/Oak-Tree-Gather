@@ -408,6 +408,7 @@ def initialize_database():
         ensure_column(db, "event_series", "anchor_day", "anchor_day INTEGER")
         ensure_column(db, "event_series", "ping_role_id", "ping_role_id INTEGER")
         ensure_column(db, "event_series", "ping_role_name", "ping_role_name TEXT")
+        ensure_column(db, "event_series", "ping_type", "ping_type TEXT NOT NULL DEFAULT 'role'")
         ensure_column(db, "event_series", "vote_cutoff_offset_minutes", "vote_cutoff_offset_minutes INTEGER")
         ensure_column(db, "event_series", "rsvp_cutoff_offset_minutes", "rsvp_cutoff_offset_minutes INTEGER")
         ensure_column(db, "event_series", "post_days_before", "post_days_before INTEGER NOT NULL DEFAULT 5")
@@ -580,6 +581,7 @@ def get_event(instance_id: int):
                 s.anchor_day,
                 s.ping_role_id,
                 s.ping_role_name,
+                s.ping_type,
                 s.vote_cutoff_offset_minutes,
                 s.rsvp_cutoff_offset_minutes,
                 s.post_days_before,
@@ -1114,15 +1116,15 @@ def copy_series_configuration(source_series_id: int, *, guild_id: int, channel_i
             """INSERT INTO event_series (
                 guild_id, channel_id, creator_id, creator_name, title, description, date_text, time_text,
                 repeat_rule, location_mode, vote_type, vote_visibility, image_url, image_blob, image_filename, timezone, start_time_local,
-                anchor_day, ping_role_id, ping_role_name, vote_cutoff_offset_minutes, rsvp_cutoff_offset_minutes,
+                anchor_day, ping_role_id, ping_role_name, ping_type, vote_cutoff_offset_minutes, rsvp_cutoff_offset_minutes,
                 post_days_before, reminder_minutes, active, thread_enabled, capacity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
             (guild_id, channel_id, creator_id, creator_name, title, description, date_text, time_text,
              repeat_rule, src["location_mode"], src["vote_type"] if "vote_type" in src.keys() else "single",
              src["vote_visibility"] if "vote_visibility" in src.keys() else "public",
              src["image_url"], src["image_blob"], src["image_filename"],
              src["timezone"], local_start.strftime("%H:%M"), local_start.day, src["ping_role_id"], src["ping_role_name"],
-             src["vote_cutoff_offset_minutes"], src["rsvp_cutoff_offset_minutes"], src["post_days_before"],
+             src["ping_type"] if "ping_type" in src.keys() else ("role" if src["ping_role_id"] else "none"), src["vote_cutoff_offset_minutes"], src["rsvp_cutoff_offset_minutes"], src["post_days_before"],
              src["reminder_minutes"], src["thread_enabled"] if "thread_enabled" in src.keys() else 1,
              src["capacity"] if "capacity" in src.keys() else None)
         )
@@ -2124,6 +2126,7 @@ class EventDraft:
     image_filename: str | None = None
     ping_role_id: int | None = None
     ping_role_name: str | None = None
+    ping_type: str = "none"
     vote_cutoff_at_utc: datetime | None = None
     rsvp_cutoff_at_utc: datetime | None = None
     vote_cutoff_offset_minutes: int | None = None
@@ -2176,7 +2179,11 @@ def build_setup_embed(draft: EventDraft) -> discord.Embed:
             inline=False,
         )
 
-    if draft.ping_role_id:
+    if draft.ping_type == "everyone":
+        embed.add_field(name="📣 Ping", value="@everyone", inline=False)
+    elif draft.ping_type == "here":
+        embed.add_field(name="📣 Ping", value="@here", inline=False)
+    elif draft.ping_type == "role" and draft.ping_role_id:
         embed.add_field(name="📣 Ping", value=f"<@&{draft.ping_role_id}>", inline=False)
 
     if draft.repeat_rule != "none":
@@ -2643,14 +2650,35 @@ class ImageUploadModal(discord.ui.Modal, title="Event Image"):
         await interaction.response.edit_message(embed=build_setup_embed(self.setup_view.draft), view=self.setup_view)
 
 
-class RoleSetupModal(discord.ui.Modal, title="Ping Role"):
+class RoleSetupModal(discord.ui.Modal, title="Ping"):
     def __init__(self, setup_view):
         super().__init__()
         self.setup_view = setup_view
         draft = setup_view.draft
+
+        current_type = draft.ping_type or ("role" if draft.ping_role_id else "none")
+        self.ping_type_select = discord.ui.Select(
+            placeholder="Choose who to ping",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="No ping", value="none", emoji="🔕", default=current_type == "none"),
+                discord.SelectOption(label="A role", value="role", emoji="📣", description="Example: @MTG or @Snowboarding", default=current_type == "role"),
+                discord.SelectOption(label="@here", value="here", emoji="👋", description="Notify online members who can see the channel", default=current_type == "here"),
+                discord.SelectOption(label="@everyone", value="everyone", emoji="📢", description="Notify everyone who can see the channel", default=current_type == "everyone"),
+            ],
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Ping Target",
+                description="Choose no ping, a server role, @here, or @everyone.",
+                component=self.ping_type_select,
+            )
+        )
+
         defaults = [discord.Object(id=draft.ping_role_id)] if draft.ping_role_id else []
         self.role_select = discord.ui.RoleSelect(
-            placeholder="Select a role to ping (optional)",
+            placeholder="Role to ping (only used when 'A role' is selected)",
             min_values=0,
             max_values=1,
             required=False,
@@ -2658,25 +2686,37 @@ class RoleSetupModal(discord.ui.Modal, title="Ping Role"):
         )
         self.add_item(
             discord.ui.Label(
-                text="Announcement Role",
-                description="Example: @MTG or @Snowboarding. Leave blank for no ping.",
+                text="Role",
+                description="Optional unless Ping Target is 'A role'.",
                 component=self.role_select,
             )
         )
 
     async def on_submit(self, interaction: discord.Interaction):
-        if not self.role_select.values:
-            self.setup_view.draft.ping_role_id = None
-            self.setup_view.draft.ping_role_name = None
-        else:
+        ping_type = self.ping_type_select.values[0]
+        draft = self.setup_view.draft
+
+        if ping_type == "role":
+            if not self.role_select.values:
+                await interaction.response.send_message(
+                    "Choose a role, or select No ping / @here / @everyone.", ephemeral=True
+                )
+                return
             role = self.role_select.values[0]
             if role.is_default():
-                await interaction.response.send_message("Please choose a role other than @everyone.", ephemeral=True)
+                await interaction.response.send_message(
+                    "Use the @everyone option instead of selecting the default role.", ephemeral=True
+                )
                 return
-            self.setup_view.draft.ping_role_id = role.id
-            self.setup_view.draft.ping_role_name = role.name
+            draft.ping_type = "role"
+            draft.ping_role_id = role.id
+            draft.ping_role_name = role.name
+        else:
+            draft.ping_type = ping_type
+            draft.ping_role_id = None
+            draft.ping_role_name = None
 
-        await interaction.response.edit_message(embed=build_setup_embed(self.setup_view.draft), view=self.setup_view)
+        await interaction.response.edit_message(embed=build_setup_embed(draft), view=self.setup_view)
 
 
 class ScheduleSetupModal(discord.ui.Modal, title="Schedule & Cutoffs"):
@@ -3048,7 +3088,7 @@ class EventSetupView(discord.ui.View):
     async def image_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ImageUploadModal(self))
 
-    @discord.ui.button(label="Ping Role", emoji="📣", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Ping", emoji="📣", style=discord.ButtonStyle.secondary, row=0)
     async def role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RoleSetupModal(self))
 
@@ -3197,6 +3237,7 @@ class BasicEventModal(discord.ui.Modal):
             draft.image_filename = source["image_filename"]
             draft.ping_role_id = source["ping_role_id"]
             draft.ping_role_name = source["ping_role_name"]
+            draft.ping_type = source["ping_type"] if "ping_type" in source.keys() else ("role" if source["ping_role_id"] else "none")
             draft.vote_cutoff_offset_minutes = source["vote_cutoff_offset_minutes"]
             draft.rsvp_cutoff_offset_minutes = source["rsvp_cutoff_offset_minutes"]
             draft.post_days_before = int(source["post_days_before"] or 5)
@@ -3255,9 +3296,30 @@ async def resolve_channel(channel_id: int):
     return channel
 
 
+def event_ping_type(event_or_series) -> str:
+    try:
+        value = event_or_series["ping_type"]
+    except (KeyError, IndexError, TypeError):
+        value = None
+    if value:
+        return value
+    try:
+        return "role" if event_or_series["ping_role_id"] else "none"
+    except (KeyError, IndexError, TypeError):
+        return "none"
+
+
 def role_ping_content(event_or_series, guild: discord.Guild | None, channel) -> str | None:
+    ping_type = event_ping_type(event_or_series)
+    if ping_type == "everyone":
+        return "@everyone"
+    if ping_type == "here":
+        return "@here"
+    if ping_type != "role" or guild is None:
+        return None
+
     role_id = event_or_series["ping_role_id"]
-    if not role_id or guild is None:
+    if not role_id:
         return None
     role = guild.get_role(int(role_id))
     if role is None:
@@ -3271,7 +3333,17 @@ def role_ping_content(event_or_series, guild: discord.Guild | None, channel) -> 
     return f"📣 **{role.name}**"
 
 
-def validate_post_permissions(channel, guild: discord.Guild | None, has_image: bool, ping_role_id: int | None):
+def allowed_mentions_for_ping(event_or_series) -> discord.AllowedMentions:
+    ping_type = event_ping_type(event_or_series)
+    return discord.AllowedMentions(
+        everyone=ping_type in {"everyone", "here"},
+        users=False,
+        roles=ping_type == "role",
+        replied_user=False,
+    )
+
+
+def validate_post_permissions(channel, guild: discord.Guild | None, has_image: bool, ping_role_id: int | None, ping_type: str = "none"):
     if guild is None or guild.me is None:
         return
     permissions = channel.permissions_for(guild.me)
@@ -3286,6 +3358,8 @@ def validate_post_permissions(channel, guild: discord.Guild | None, has_image: b
         missing.append("Read Message History")
     if has_image and not permissions.attach_files:
         missing.append("Attach Files")
+    if ping_type in {"everyone", "here"} and not permissions.mention_everyone:
+        missing.append("Mention @everyone, @here, and All Roles")
 
     if missing:
         raise RuntimeError("Oak Tree Gather is missing these channel permissions: " + ", ".join(missing))
@@ -3336,12 +3410,12 @@ async def post_instance_message(instance_id: int, ping_role: bool = True):
 
     channel = await resolve_channel(event["channel_id"])
     guild = bot.get_guild(event["guild_id"])
-    validate_post_permissions(channel, guild, bool(event["image_blob"]), event["ping_role_id"] if ping_role else None)
+    validate_post_permissions(channel, guild, bool(event["image_blob"]), event["ping_role_id"] if ping_role else None, event_ping_type(event) if ping_role else "none")
 
     embed = build_embed(instance_id)
     view = EventView(instance_id)
     content = role_ping_content(event, guild, channel) if ping_role else None
-    allowed_mentions = discord.AllowedMentions(everyone=False, users=False, roles=True, replied_user=False)
+    allowed_mentions = allowed_mentions_for_ping(event) if ping_role else discord.AllowedMentions.none()
 
     event_file = None
     if event["image_blob"] and event["image_filename"]:
@@ -3395,7 +3469,7 @@ async def create_event_from_draft(interaction: discord.Interaction, draft: Event
 
     channel = await resolve_channel(draft.channel_id)
     guild = bot.get_guild(draft.guild_id)
-    validate_post_permissions(channel, guild, bool(draft.image_bytes), draft.ping_role_id)
+    validate_post_permissions(channel, guild, bool(draft.image_bytes), draft.ping_role_id, draft.ping_type)
 
     with get_db() as db:
         cursor = db.execute(
@@ -3404,10 +3478,10 @@ async def create_event_from_draft(interaction: discord.Interaction, draft: Event
                 guild_id, channel_id, creator_id, creator_name,
                 title, description, date_text, time_text, repeat_rule, location_mode, vote_type, vote_visibility,
                 image_blob, image_filename, timezone, start_time_local, anchor_day,
-                ping_role_id, ping_role_name, vote_cutoff_offset_minutes,
+                ping_role_id, ping_role_name, ping_type, vote_cutoff_offset_minutes,
                 rsvp_cutoff_offset_minutes, post_days_before, reminder_minutes, active, thread_enabled, capacity
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
                 draft.guild_id,
@@ -3429,6 +3503,7 @@ async def create_event_from_draft(interaction: discord.Interaction, draft: Event
                 local_start.day,
                 draft.ping_role_id,
                 draft.ping_role_name,
+                draft.ping_type,
                 draft.vote_cutoff_offset_minutes,
                 draft.rsvp_cutoff_offset_minutes,
                 draft.post_days_before,
@@ -3526,7 +3601,7 @@ async def send_event_notice(instance_id: int, text: str, ping_role: bool = False
     content_parts.append(text)
     await channel.send(
         "\n".join(content_parts),
-        allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=True),
+        allowed_mentions=allowed_mentions_for_ping(event) if ping_role else discord.AllowedMentions.none(),
     )
 
 
@@ -4664,13 +4739,14 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # START
 # ==================================================
 
-print(">>> Starting Oak Tree Gather...")
-try:
-    bot.run(TOKEN)
-except Exception as error:
-    print(">>> BOT CRASHED:")
-    print(type(error).__name__)
-    print(repr(error))
-    raise
-finally:
-    print(">>> bot.run() ended")
+if __name__ == "__main__":
+    print(">>> Starting Oak Tree Gather...")
+    try:
+        bot.run(TOKEN)
+    except Exception as error:
+        print(">>> BOT CRASHED:")
+        print(type(error).__name__)
+        print(repr(error))
+        raise
+    finally:
+        print(">>> bot.run() ended")

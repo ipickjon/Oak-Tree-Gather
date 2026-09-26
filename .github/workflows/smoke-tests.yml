@@ -1,0 +1,31 @@
+name: Smoke tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DISCORD_TOKEN: smoke-test-token
+      GATHER_TIMEZONE: America/Denver
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile bot
+        run: python -m py_compile bot.py
+
+      - name: Run smoke tests
+        run: python -m unittest discover -s tests -v
